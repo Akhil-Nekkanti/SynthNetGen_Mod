@@ -55,8 +55,8 @@ EOF_ORCA_INPUT
     mv -- "$ORCA_OUTPUT" data_middle1.txt || exit 1
 )
 
-# BLANT must retain its resource-directory cwd, while its captured output is
-# private to this invocation. No graph or scratch file is written there.
+# Concurrent BLANT calls share the read-only canon_maps in the resource-directory
+# cwd. Each invocation captures output in its worker's private directory.
 run_bnb() (
     local K="$1"
     local GRAPH_ABS GRAPH_QUOTED
@@ -74,9 +74,9 @@ run_bnb() (
 # clamped so small graphs still get enough trials for stable estimates while
 # large graphs cannot make every candidate evaluation arbitrarily expensive.
 REFERENCE_N=1000
-MIN_EFFECTIVE_N=500
-MAX_EFFECTIVE_N=5000
-MAX_APPLY_SAMPLES=100000
+MIN_EFFECTIVE_N=25000
+MAX_EFFECTIVE_N=25001
+MAX_APPLY_SAMPLES=1000000
 
 # The final optimization round always uses these tightest constraints. hdgb
 # is expressed at the 1,000-node reference size and is scaled after the target
@@ -813,7 +813,10 @@ column_graphlet=(0 0 0 0 6 6 5 5 8 7 7 7 9 9 10)
 declare -a graphlet_node_count
 declare -a rare_graphlet
 
-# Transformation probes and round candidates are evaluated sequentially.
+# Limit simultaneous transformation probes and round candidates independently.
+# For example: PARALLEL_JOBS=4 ROUND_JOBS=2 ./rpllb.sh ...
+PARALLEL_JOBS="${PARALLEL_JOBS:-2}"
+ROUND_JOBS="${ROUND_JOBS:-$PARALLEL_JOBS}"
 
 declare -a ec
 for ((i=1; i<=MAX_TRANSFORMATION; i++)); do
@@ -870,9 +873,9 @@ ec[72]=0;   # Exchange two edges between a triangle and a branch.
 BASELINE_DIR="baseline"
 mkdir -p "$BASELINE_DIR"
 
-# Keep candidate scratch files in private directories even though work is serial.
-# BLANT-backed bnb calls use the resource directory through run_bnb.
-prepare_serial_worker() {
+# Keep each worker's mutable scratch files private. BLANT-backed bnb calls
+# share only the resource directory through run_bnb.
+prepare_parallel_worker() {
     local WORK_DIR="$1"
     local ROOT_DIR="$2"
     local SHARED_FILE TOOL
@@ -1311,6 +1314,12 @@ run_round() {
         local ROOT_DIR
         ROOT_DIR=$(pwd -P)
 
+        local MAX_JOBS="$ROUND_JOBS"
+        if ! is_positive_integer "$MAX_JOBS"; then
+            echo "ROUND_JOBS must be a positive integer, not '$MAX_JOBS'." >&2
+            exit 1
+        fi
+
         local INPUT_ABS OUTPUT_ABS TARGET_ABS VEC_TAR_ABS F0_ABS
         local EVS_ABS BXK4F_ABS BXK4ONE_ABS
         INPUT_ABS=$(realpath "$INPUT_SYNTH")
@@ -1344,7 +1353,7 @@ run_round() {
         had_score=$(objective_score "$F0_ABS" "$INPL")
 
         # ---------------------------------------------------------
-        # 1. Generate and evaluate enabled EVC candidates sequentially: small
+        # 1. Generate and evaluate enabled EVC candidates in parallel: small
         #    and large runs of evc1, evc2, and the union/intersection evc3.
         # ---------------------------------------------------------
         local EVC_DIR="$ROUND_DIR/evc"
@@ -1379,7 +1388,9 @@ run_round() {
             EVC_TOOLS+=("evc$EVC_ID" "evc$EVC_ID")
             EVC_AMOUNTS+=("$OUTPEV_SMALL_SAMPLES" "$OUTPEV_LARGE_SAMPLES")
         done
-        local IDX LABEL TOOL AMOUNT
+        local -a EVC_PIDS=()
+        local EVC_FAILED=0
+        local IDX LABEL TOOL AMOUNT PID
 
         for IDX in "${!EVC_LABELS[@]}"; do
             LABEL="${EVC_LABELS[$IDX]}"
@@ -1389,7 +1400,7 @@ run_round() {
             (
                 set -e
                 local WORK_DIR="$EVC_DIR/work_$LABEL"
-                prepare_serial_worker "$WORK_DIR" "$ROOT_DIR"
+                prepare_parallel_worker "$WORK_DIR" "$ROOT_DIR"
                 trap 'rm -rf -- "$WORK_DIR"' EXIT
                 cd "$WORK_DIR"
 
@@ -1434,8 +1445,27 @@ run_round() {
                     "$AFTER_EV_DISTANCE" "$GATE_REASON" \
                     > "$EVC_DIR/$LABEL.result.tmp"
                 mv "$EVC_DIR/$LABEL.result.tmp" "$EVC_DIR/$LABEL.result"
-            )
+            ) &
+            EVC_PIDS+=("$!")
+
+            if (( ${#EVC_PIDS[@]} >= MAX_JOBS )); then
+                if ! wait "${EVC_PIDS[0]}"; then
+                    EVC_FAILED=1
+                fi
+                EVC_PIDS=("${EVC_PIDS[@]:1}")
+            fi
         done
+
+        for PID in "${EVC_PIDS[@]}"; do
+            if ! wait "$PID"; then
+                EVC_FAILED=1
+            fi
+        done
+
+        if (( EVC_FAILED )); then
+            echo "At least one parallel EVC evaluation failed." >&2
+            exit 1
+        fi
 
         local BEST_EVC_GRAPH="$INPUT_ABS"
         local BEST_EVC_SCORE="$had_score"
@@ -1542,7 +1572,7 @@ run_round() {
         had_score=$(objective_score "$F0_ABS" "$INPL")
 
         # ---------------------------------------------------------
-        # 3. Evaluate the ten most promising nonredundant pairs sequentially.
+        # 3. Evaluate the ten most promising nonredundant pairs in parallel.
         # ---------------------------------------------------------
         local TOP_DIR="$ROUND_DIR/top"
         mkdir -p "$TOP_DIR"
@@ -1559,6 +1589,8 @@ run_round() {
             exit 1
         fi
 
+        local -a TOP_PIDS=()
+        local TOP_FAILED=0
         local RANK LINE
         local sorted_score sorted_VAL sorted_VAL2 sorted_MAG sorted_MAG2
         local SCALE SCALE2
@@ -1587,7 +1619,7 @@ run_round() {
             (
                 set -e
                 local WORK_DIR="$TOP_DIR/work_$RANK"
-                prepare_serial_worker "$WORK_DIR" "$ROOT_DIR"
+                prepare_parallel_worker "$WORK_DIR" "$ROOT_DIR"
                 trap 'rm -rf -- "$WORK_DIR"' EXIT
                 cd "$WORK_DIR"
 
@@ -1650,8 +1682,27 @@ run_round() {
                     > "$TOP_DIR/result_$(printf '%02d' "$RANK").tmp"
                 mv "$TOP_DIR/result_$(printf '%02d' "$RANK").tmp" \
                    "$TOP_DIR/result_$(printf '%02d' "$RANK").txt"
-            )
+            ) &
+            TOP_PIDS+=("$!")
+
+            if (( ${#TOP_PIDS[@]} >= MAX_JOBS )); then
+                if ! wait "${TOP_PIDS[0]}"; then
+                    TOP_FAILED=1
+                fi
+                TOP_PIDS=("${TOP_PIDS[@]:1}")
+            fi
         done
+
+        for PID in "${TOP_PIDS[@]}"; do
+            if ! wait "$PID"; then
+                TOP_FAILED=1
+            fi
+        done
+
+        if (( TOP_FAILED )); then
+            echo "At least one parallel top-pair evaluation failed." >&2
+            exit 1
+        fi
 
         local BEST_VAL=""
         local BEST_VAL2=""
@@ -1806,6 +1857,14 @@ generate_outinp() {
         TARGET_ABS=$(realpath "$TARGET")
         VEC_INS_ABS=$(realpath vecInS.txt)
 
+        local MAX_JOBS="$PARALLEL_JOBS"
+        if ! is_positive_integer "$MAX_JOBS"; then
+                echo "PARALLEL_JOBS must be a positive integer, not '$MAX_JOBS'." >&2
+                return 1
+        fi
+
+        local -a PIDS=()
+        local FAILED=0
         local VAL
 
         for VAL in "${ACTIVE_CANDS[@]}"; do
@@ -1816,7 +1875,7 @@ generate_outinp() {
                         WORK_DIR=$(mktemp -d "$ROOT_DIR/.generate_outinp_${VAL}.XXXXXX")
                         trap 'rm -rf -- "$WORK_DIR"' EXIT
 
-                        prepare_serial_worker "$WORK_DIR" "$ROOT_DIR"
+                        prepare_parallel_worker "$WORK_DIR" "$ROOT_DIR"
 
                         cd "$WORK_DIR"
 
@@ -1861,8 +1920,28 @@ generate_outinp() {
 
                         # mv is atomic on the same filesystem, so run_round never sees a half-written file.
                         mv "$OUT_INP" "$ROOT_DIR/outinp_val_${VAL}.txt"
-                )
+                ) &
+                PIDS+=("$!")
+
+                if (( ${#PIDS[@]} >= MAX_JOBS )); then
+                        if ! wait "${PIDS[0]}"; then
+                                FAILED=1
+                        fi
+                        PIDS=("${PIDS[@]:1}")
+                fi
         done
+
+        local PID
+        for PID in "${PIDS[@]}"; do
+                if ! wait "$PID"; then
+                        FAILED=1
+                fi
+        done
+
+        if (( FAILED )); then
+                echo "At least one parallel generate_outinp job failed." >&2
+                return 1
+        fi
         echo "Generated all ${#ACTIVE_CANDS[@]} transformation results."
 }
 
