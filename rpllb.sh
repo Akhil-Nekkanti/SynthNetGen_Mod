@@ -74,8 +74,8 @@ run_bnb() (
 # clamped so small graphs still get enough trials for stable estimates while
 # large graphs cannot make every candidate evaluation arbitrarily expensive.
 REFERENCE_N=1000
-MIN_EFFECTIVE_N=25000
-MAX_EFFECTIVE_N=25001
+MIN_EFFECTIVE_N=2000
+MAX_EFFECTIVE_N=20000
 MAX_APPLY_SAMPLES=1000000
 
 # The final optimization round always uses these tightest constraints. hdgb
