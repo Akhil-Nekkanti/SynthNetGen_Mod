@@ -23,11 +23,11 @@ int main(int argc, char* argv[]) {
     const char* output_env = getenv("BNB_OUTPUT_FILE");
     const string output_file = output_env && *output_env ? output_env : "data1.txt";
 
-    // The caller supplies a shell-quoted graph argument. BLANT keeps its
-    // resource-directory cwd while its output can live in private scratch.
+    // BLANT keeps its resource-directory cwd while its output can live in
+    // private scratch. The graph path is quoted here, so callers pass it raw.
     string cmd = "./blant -k " + to_string(k)
                 + " -s EBE -n 100000 "
-                + file1
+                + shell_quote(file1)
                 + " > " + shell_quote(output_file)  + " 2>/dev/null";
 
     int ret = system(cmd.c_str());

@@ -98,9 +98,9 @@ PAIR *edges; // list of edges
 int **adj; // adj[x] - adjacency list of node x
 PII **inc; // inc[x] - incidence list of node x: (y, edge id)
 bool adjacent_list(int x, int y) { return binary_search(adj[x],adj[x]+deg[x],y); }
-int *adj_matrix; // compressed adjacency matrix
-const int adj_chunk = 8*sizeof(int);
-bool adjacent_matrix(int x, int y) { return adj_matrix[(x*n+y)/adj_chunk]&(1<<((x*n+y)%adj_chunk)); }
+unsigned *adj_matrix; // compressed adjacency matrix
+const int adj_chunk = 8*sizeof(unsigned);
+bool adjacent_matrix(int x, int y) { return adj_matrix[(x*n+y)/adj_chunk]&(1u<<((x*n+y)%adj_chunk)); }
 bool (*adjacent)(int,int);
 
 int64 **orbit; // orbit[x][o] - how many times does node x participate in orbit o
@@ -702,13 +702,19 @@ int init(int argc, char *argv[]) {
 		return 0;
 	}
 	// read input graph
-	fin >> n >> m;
+	if (!(fin >> n >> m) || n < 0 || m < 0) {
+		cerr << "Missing or invalid 'n m' header in " << argv[2] << endl;
+		return 0;
+	}
 	int d_max=0;
 	edges = (PAIR*)malloc(m*sizeof(PAIR));
 	deg = (int*)calloc(n,sizeof(int));
 	for (int i=0;i<m;i++) {
 		int a,b;
-		fin >> a >> b;
+		if (!(fin >> a >> b)) {
+			cerr << "Expected " << m << " edges but the input ended after " << i << "." << endl;
+			return 0;
+		}
 		if (!(0<=a && a<n) || !(0<=b && b<n)) {
 			cerr << "Node ids should be between 0 and n-1." << endl;
 			return 0;
@@ -732,11 +738,11 @@ int init(int argc, char *argv[]) {
 	// set up adjacency matrix if it's smaller than 100MB
 	if ((int64)n*n < 100LL*1024*1024*8) {
 		adjacent = adjacent_matrix;
-		adj_matrix = (int*)calloc((n*n)/adj_chunk+1,sizeof(int));
+		adj_matrix = (unsigned*)calloc((n*n)/adj_chunk+1,sizeof(unsigned));
 		for (int i=0;i<m;i++) {
 			int a=edges[i].a, b=edges[i].b;
-			adj_matrix[(a*n+b)/adj_chunk]|=(1<<((a*n+b)%adj_chunk));
-			adj_matrix[(b*n+a)/adj_chunk]|=(1<<((b*n+a)%adj_chunk));
+			adj_matrix[(a*n+b)/adj_chunk]|=(1u<<((a*n+b)%adj_chunk));
+			adj_matrix[(b*n+a)/adj_chunk]|=(1u<<((b*n+a)%adj_chunk));
 		}
 	} else {
 		adjacent = adjacent_list;
@@ -778,7 +784,7 @@ void writeResults(int g=5) {
 int main(int argc, char *argv[]) {
 	if (!init(argc, argv)) {
 		cerr << "Stopping!" << endl;
-		return 0;
+		return 1;
 	}
 	if (GS==4) count4();
 	if (GS==5) count5();

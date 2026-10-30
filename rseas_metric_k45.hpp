@@ -28,6 +28,28 @@ inline double safe_log(double value) {
     return value > 0.0 ? std::log(value) : LOG_FLOOR;
 }
 
+// Allocation-free form for hot loops: distances[0..n) are already absolute
+// errors and config was validated once by the caller. Same arithmetic and
+// summation order as score() below.
+inline double score_distances(const double* distances, std::size_t n,
+                              const Config& config) {
+    double maximum_distance = 0.0;
+    bool outside_error_range = false;
+    for (std::size_t i = 0; i < n; ++i) {
+        maximum_distance = std::max(maximum_distance, distances[i]);
+        if (distances[i] > config.error_range) outside_error_range = true;
+    }
+    if (!outside_error_range) {
+        return maximum_distance - config.error_range;
+    }
+    double result = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const double excess = std::max(0.0, distances[i] - config.error_range);
+        result += config.weights[i] * excess * excess;
+    }
+    return result;
+}
+
 // signed_errors[i] may have either sign. RSEAS uses its absolute value.
 inline double score(const Vec& signed_errors, const Config& config) {
     if (signed_errors.empty()) {

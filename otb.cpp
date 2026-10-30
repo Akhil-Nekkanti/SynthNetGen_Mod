@@ -2,6 +2,10 @@
 using namespace std;
 
 int main(int argc, char* argv[]) {
+    if (argc != 2 || (string(argv[1]) != "4" && string(argv[1]) != "5")) {
+        cerr << "Usage: " << argv[0] << " <k: 4|5> < orca_output\n";
+        return 1;
+    }
     ios::sync_with_stdio(false);
     cin.tie(nullptr);
     int k = stoi(argv[1]);

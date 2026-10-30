@@ -3748,7 +3748,6 @@ private:
 
     void apply_from_claw(
         int mode, const array<int, 5>& nodes, const Sub4& sub) {
-	    static ofstream moddeg("moddeg");
         array<int, 3> leaves{};
         int leaf_count = 0;
         int center = -1;
@@ -3784,15 +3783,12 @@ private:
                     {EdgeAction::Remove, z, v},
                 });
                 break;
-            case 20:{
-	                bool ididityay = try_operation({
-	                    {EdgeAction::Add, v, w},
-	                    {EdgeAction::Remove, z, w},
-	                });
-					if (ididityay) moddeg << graph_.degree[u] << ' ' << graph_.degree[z] << ' '
-	                       << graph_.degree[v] << ' ' << graph_.degree[w] << '\n';
-	            }
-				break;
+            case 20:
+                try_operation({
+                    {EdgeAction::Add, v, w},
+                    {EdgeAction::Remove, z, w},
+                });
+                break;
             case 30:
                 try_operation({
                     {EdgeAction::Add, u, v},

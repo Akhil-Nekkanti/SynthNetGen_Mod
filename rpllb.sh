@@ -59,15 +59,13 @@ EOF_ORCA_INPUT
 # cwd. Each invocation captures output in its worker's private directory.
 run_bnb() (
     local K="$1"
-    local GRAPH_ABS GRAPH_QUOTED
+    local GRAPH_ABS
     GRAPH_ABS=$(realpath -- "$2") || return 1
-    # bnb embeds argv[2] in a shell command; preserve its quoted-path contract.
-    GRAPH_QUOTED="'${GRAPH_ABS//\'/\'\\\'\'}'"
     BNB_OUTPUT_FILE=$(mktemp "$PWD/.bnb_output.XXXXXXXX") || return 1
     export BNB_OUTPUT_FILE
     trap 'rm -f -- "$BNB_OUTPUT_FILE"' EXIT
     cd -- "$BLANT_RESOURCE_DIR" || return 1
-    "$SCMD_PROJECT_DIR/bnb" "$K" "$GRAPH_QUOTED"
+    "$SCMD_PROJECT_DIR/bnb" "$K" "$GRAPH_ABS"
 )
 
 # Node-dependent work is calibrated to a 1,000-node graph.  EFFECTIVE_N is

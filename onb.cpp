@@ -4,7 +4,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <cmath>
-#include <set>
+#include <algorithm>
 #include <cstdio>
 #include <unistd.h>
 using namespace std;
@@ -47,18 +47,27 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    set<string> nodes;
-    string u, v;
+    // ORCA requires node ids 0..n-1 and sizes its arrays from the header, so
+    // n is the largest id plus one (the distinct-label count undercounts when
+    // an id is missing). For cleaned graphs the two are equal.
+    long long u, v, max_id = -1;
     int edges = 0;
 
     while (fin >> u >> v) {
-        nodes.insert(u);
-        nodes.insert(v);
+        if (u < 0 || v < 0) {
+            cerr << "Error: negative node id in " << file1 << "\n";
+            return 1;
+        }
+        max_id = max(max_id, max(u, v));
         edges++;
+    }
+    if (!fin.eof()) {
+        cerr << "Error: " << file1 << " must contain integer node ids\n";
+        return 1;
     }
     fin.close();
 
-    int n = nodes.size();
+    const long long n = max_id + 1;
 
     // ORCA needs a header. Keep that copy in the caller's private working
     // directory so neither successful counting nor failures modify the graph.
