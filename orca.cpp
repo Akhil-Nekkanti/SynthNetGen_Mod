@@ -27,7 +27,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <iostream>
 #include <fstream>
 #include <set>
-#include <unordered_map>
+#include <vector>
 #include <algorithm>
 using namespace std;
 
@@ -51,13 +51,6 @@ static inline size_t mix64(uint64_t z) {
 	z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
 	return (size_t)(z ^ (z >> 31));
 }
-struct hash_PAIR {
-	size_t operator()(const PAIR &x) const {
-		// Pack both ids into 64 bits and mix; the old (a<<8)^b collided heavily
-		// once n > 256 and overflowed a signed int for large ids.
-		return mix64(((uint64_t)(uint32_t)x.a << 32) | (uint32_t)x.b);
-	}
-};
 
 struct TRIPLE {
 	int a, b, c;
@@ -77,19 +70,67 @@ bool operator<(const TRIPLE &x, const TRIPLE &y) {
 bool operator==(const TRIPLE &x, const TRIPLE &y) {
 	return x.a==y.a && x.b==y.b && x.c==y.c;
 }
-struct hash_TRIPLE {
-	size_t operator()(const TRIPLE &x) const {
-		return mix64(((uint64_t)(uint32_t)x.a << 42) ^ ((uint64_t)(uint32_t)x.b << 21) ^ (uint32_t)x.c);
+
+// Open-addressing counter keyed by a packed 64-bit id: linear probing,
+// power-of-two capacity, load factor <= 1/2. count5 does tens of millions of
+// increments (stage 1) and lookups (stage 3) on these; this replaces
+// unordered_map's node-per-entry layout. It stores the same integer counts,
+// so orbit output is unchanged. get() is read-only and safe to call from
+// several threads once stage 1 has finished.
+struct CountTable {
+	static constexpr uint64_t EMPTY = ~0ULL; // never a valid packed key
+	vector<uint64_t> keys;
+	vector<int> vals;
+	size_t mask = 0, used = 0;
+
+	CountTable() { rehash(1u << 16); }
+
+	void rehash(size_t capacity) {
+		vector<uint64_t> old_keys(capacity, EMPTY);
+		vector<int> old_vals(capacity, 0);
+		old_keys.swap(keys);
+		old_vals.swap(vals);
+		mask = capacity - 1;
+		for (size_t i = 0; i < old_keys.size(); i++) {
+			if (old_keys[i] == EMPTY) continue;
+			size_t j = mix64(old_keys[i]) & mask;
+			while (keys[j] != EMPTY) j = (j + 1) & mask;
+			keys[j] = old_keys[i];
+			vals[j] = old_vals[i];
+		}
+	}
+
+	int& at(uint64_t key) {
+		if ((used + 1) * 2 > keys.size()) rehash(keys.size() * 2);
+		size_t i = mix64(key) & mask;
+		while (keys[i] != key) {
+			if (keys[i] == EMPTY) { keys[i] = key; vals[i] = 0; used++; break; }
+			i = (i + 1) & mask;
+		}
+		return vals[i];
+	}
+
+	int get(uint64_t key) const {
+		for (size_t i = mix64(key) & mask; ; i = (i + 1) & mask) {
+			if (keys[i] == key) return vals[i];
+			if (keys[i] == EMPTY) return 0;
+		}
 	}
 };
 
-unordered_map<PAIR, int, hash_PAIR> common2;
-unordered_map<TRIPLE, int, hash_TRIPLE> common3;
-unordered_map<PAIR, int, hash_PAIR>::iterator common2_it;
-unordered_map<TRIPLE, int, hash_TRIPLE>::iterator common3_it;
+static inline uint64_t pair_key(const PAIR &p) {
+	return ((uint64_t)(uint32_t)p.a << 32) | (uint32_t)p.b;
+}
+// Three 21-bit ids; count5 checks n < 2^21 before using it.
+static inline uint64_t triple_key(const TRIPLE &t) {
+	return ((uint64_t)t.a << 42) | ((uint64_t)t.b << 21) | (uint64_t)t.c;
+}
 
-#define common3_get(x) (((common3_it=common3.find(x))!=common3.end())?(common3_it->second):0)
-#define common2_get(x) (((common2_it=common2.find(x))!=common2.end())?(common2_it->second):0)
+CountTable common2;
+CountTable common3;
+
+#define common3_get(x) (common3.get(triple_key(x)))
+#define common2_get(x) (common2.get(pair_key(x)))
 
 int n,m; // n = number of nodes, m = number of edges
 int *deg; // degrees of individual nodes
@@ -293,13 +334,13 @@ void count5() {
 			for (int n2=n1+1;n2<deg[x];n2++) {
 				int b=adj[x][n2];
 				PAIR ab=PAIR(a,b);
-				common2[ab]++;
+				common2.at(pair_key(ab))++;
 				for (int n3=n2+1;n3<deg[x];n3++) {
 					int c=adj[x][n3];
 					int st = adjacent(a,b)+adjacent(a,c)+adjacent(b,c);
 					if (st<2) continue;
 					TRIPLE abc=TRIPLE(a,b,c);
-					common3[abc]++;
+					common3.at(triple_key(abc))++;
 				}
 			}
 		}
@@ -373,12 +414,10 @@ void count5() {
 	// Each node's equations read shared, already-final data (adjacency, tri,
 	// C5, common2/common3) and write only orbit[x], with integer arithmetic,
 	// so splitting nodes across ORCA_THREADS threads gives identical output.
-	// Scratch arrays and the common*_get iterators are per thread.
+	// Scratch arrays are per thread; common*_get only reads the tables.
 	const int threads = orca_threads();
 	#pragma omp parallel num_threads(threads)
 	{
-	unordered_map<PAIR, int, hash_PAIR>::iterator common2_it;
-	unordered_map<TRIPLE, int, hash_TRIPLE>::iterator common3_it;
 	int *common_x = (int*)calloc(n,sizeof(int));
 	int *common_x_list = (int*)malloc(n*sizeof(int)), ncx=0;
 	int *common_a = (int*)calloc(n,sizeof(int));
@@ -805,6 +844,10 @@ void writeResults(int g=5) {
 int main(int argc, char *argv[]) {
 	if (!init(argc, argv)) {
 		cerr << "Stopping!" << endl;
+		return 1;
+	}
+	if (GS==5 && n >= (1<<21)) {
+		cerr << "count5 packs node ids into 21 bits; n must be below 2097152." << endl;
 		return 1;
 	}
 	if (GS==4) count4();
