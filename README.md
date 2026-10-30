@@ -28,7 +28,7 @@ Use `./rpllb.sh` in either command to estimate graphlet frequencies with BLANT i
 - `synth_base`: optional starting graph with the same node count as the cleaned target.
 - `RSEAS_rounds`: number of RSEAS optimization rounds; must be positive.
 - `RMSE_rounds`: number of subsequent RMSE optimization rounds; may be zero.
-- `r`: positive transformation probe refresh interval. Probes are regenerated on rounds 1, 1+r, 1+2r, etc., separately within each optimization phase.
+- `r`: baseline results are computed every `r` rounds.
 
 For parallel workers, use
 
