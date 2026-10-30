@@ -423,7 +423,7 @@ configure_node_scaled_parameters() {
 }
 
 # Build the constraint schedule backward from the final round. For evb the
-# previous value is exactly 1.25 times the next value. The encoded degb value
+# previous value is exactly ROUND_BACKWARD_FACTOR times the next value. The encoded degb value
 # and hdgb are positive integers, so each backward multiplication is rounded
 # to the nearest integer. Consequently, ROUNDS=1 uses the tightest values
 # immediately, while
@@ -576,7 +576,7 @@ fi
 
 # PIS uses one target vector, unit weights, and one error range fixed from the
 # graph entering PIS.  The state is initialized for both generated and supplied
-# base graphs because evc1 and evc3 must be compared under the same objective.
+# base graphs because evc1 and evc2 must be compared under the same objective.
 PIS_TARGET_VEC="pis_target_vec.tmp"
 PIS_CURRENT_RSEAS=""
 PIS_RSEAS_E=0.0
@@ -660,7 +660,7 @@ make_pis_increase_candidate() {
     EVC2_SCORE=$(pis_graph_rseas "$EVC2_CANDIDATE")
 
     # Prefer evc1 on an exact tie so the old PIS behavior remains the stable
-    # tie-breaker. evc3 is selected only when its measured RSEAS is lower.
+    # tie-breaker. evc2 is selected only when its measured RSEAS is lower.
     if awk -v EVC2="$EVC2_SCORE" -v EVC1="$EVC1_SCORE" \
         'BEGIN { exit !(EVC2 < EVC1) }'; then
         mv "$EVC2_CANDIDATE" "$OUTPUT_CANDIDATE"
@@ -672,14 +672,14 @@ make_pis_increase_candidate() {
 }
 
 # Initialize the fixed PIS objective for every run. This is needed even for a
-# generated base so evc1 and evc3 can be compared fairly.
+# generated base so evc1 and evc2 can be compared fairly.
 local_pis_initial_vec=$(mktemp ".pis_initial_vec.XXXXXX")
 local_pis_initial_displ=$(mktemp ".pis_initial_displ.XXXXXX")
 
 run_bnb "$GRAPHLET_K" "$TARGET" > "$PIS_TARGET_VEC"
 run_bnb "$GRAPHLET_K" "$PRE_INIT_SYNTH" > "$local_pis_initial_vec"
 
-read -r PIS_WORST_INDEX PIS_WORST_GRAPHLET PIS_MAX_ERROR PIS_RSEAS_E \
+read -r _ _ _ PIS_RSEAS_E \
     < <(log_error_summary "$local_pis_initial_vec" "$PIS_TARGET_VEC")
 
 displ "$local_pis_initial_vec" "$PIS_TARGET_VEC" "$local_pis_initial_displ"
@@ -870,9 +870,6 @@ ec[71]=0;   # Open a paw into a box and move a leaf; every degree stays fixed.
 ec[72]=0;   # Exchange two edges between a triangle and a branch.
 # Modes 73..95 retain the default ec=0: all learned inverses preserve edge count.
 
-BASELINE_DIR="baseline"
-mkdir -p "$BASELINE_DIR"
-
 # Keep each worker's mutable scratch files private. BLANT-backed bnb calls
 # share only the resource directory through run_bnb.
 prepare_parallel_worker() {
@@ -954,7 +951,7 @@ EOF_PY
 #
 # An EVC candidate is allowed precisely when
 #
-#   |log(target_ev)-log(|after_ev|)| < 0.2*evb
+#   |log(target_ev)-log(|after_ev|)| < 0.002*evb
 #
 # or when it is strictly closer to the target eigenvalue than the current
 # graph. The absolute value applies to after_ev exactly as specified.
@@ -1363,22 +1360,17 @@ run_round() {
         # EVC worker computes only its own after-change eigenvalue.
         local TARGET_EV_FILE="$EVC_DIR/target.ev"
         local CURRENT_EV_FILE="$EVC_DIR/current.ev"
-        local TARGET_EV CURRENT_EV EVC_REFERENCE
-        local EVC_REFERENCE_STATUS EVC_REFERENCE_AFTER_DISTANCE
-        local CURRENT_EV_DISTANCE EVC_DISTANCE_LIMIT EVC_REFERENCE_REASON
+        local TARGET_EV CURRENT_EV
 
         "$EVS_ABS" "$TARGET_ABS" > "$TARGET_EV_FILE"
         "$EVS_ABS" "$INPUT_ABS" > "$CURRENT_EV_FILE"
         TARGET_EV=$(read_single_eigenvalue "$TARGET_EV_FILE" "target")
         CURRENT_EV=$(read_single_eigenvalue "$CURRENT_EV_FILE" "current")
 
-        # Reuse the candidate-gate calculation to obtain the round's current
-        # log-distance and its absolute 0.2*evb threshold.
-        EVC_REFERENCE=$(evc_eigenvalue_gate \
-            "$TARGET_EV" "$CURRENT_EV" "$CURRENT_EV" "$evb")
-        IFS='|' read -r EVC_REFERENCE_STATUS EVC_REFERENCE_AFTER_DISTANCE \
-            CURRENT_EV_DISTANCE EVC_DISTANCE_LIMIT EVC_REFERENCE_REASON \
-            <<< "$EVC_REFERENCE"
+        # Run the gate once on the current graph only to validate the round's
+        # eigenvalues and evb (it exits on non-finite or nonpositive input).
+        evc_eigenvalue_gate \
+            "$TARGET_EV" "$CURRENT_EV" "$CURRENT_EV" "$evb" > /dev/null
 
         local -a EVC_LABELS=() EVC_TOOLS=() EVC_AMOUNTS=()
         local EVC_ID
@@ -1710,7 +1702,7 @@ run_round() {
         local BEST_MAG2=""
         local BEST_SCORE=""
         local BEST_GRAPH=""
-        local GOT_SCORE EXPECTED_SCORE RESULT_FILE CANDIDATE_GRAPH
+        local GOT_SCORE RESULT_FILE CANDIDATE_GRAPH
 
         # Consume results by original rank, preserving the serial tie-breaking.
         for ((RANK=1; RANK<=${#TOP_LINES[@]}; RANK++)); do
@@ -1720,7 +1712,7 @@ run_round() {
             fi
 
             IFS='|' read -r GOT_SCORE sorted_VAL sorted_VAL2 sorted_MAG sorted_MAG2 \
-                EXPECTED_SCORE _ CANDIDATE_GRAPH < "$RESULT_FILE"
+                _ _ CANDIDATE_GRAPH < "$RESULT_FILE"
 
             if [ ! -s "$CANDIDATE_GRAPH" ]; then
                 echo "Saved graph for rank $RANK is missing or empty: $CANDIDATE_GRAPH" >&2
@@ -1886,7 +1878,6 @@ generate_outinp() {
                         local OUT_INP="outinp_val_${VAL}.txt"
                         local SCALE TESTED_SCALE1 TESTED_SCALE2
 
-#set -x
                         SCALE=30000
                         apply_exp "$INS_ABS" "$SCALE" "$VAL" "$BASE_SYNTH1" \
                             TESTED_SCALE1

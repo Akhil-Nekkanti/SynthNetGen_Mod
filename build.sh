@@ -3,22 +3,42 @@ set -e
 
 cd -- "$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")"
 
-g++ -O2 cleanup.cpp -o cleanup
-g++ -O2 expfy.cpp -o expfy
-g++ -O2 onb.cpp -o onb
-g++ -O2 bnb.cpp -o bnb
-g++ -O2 gen_deg2.cpp -o gen_deg2
+# -ffp-contract=off keeps -march=native from fusing multiply-adds, which would
+# change floating-point results (and therefore expfy's learned modes 73-95).
+# Never add -ffast-math for the same reason.
+CXX="${CXX:-g++}"
+CXXFLAGS="${CXXFLAGS:--std=c++17 -O3 -march=native -ffp-contract=off -Wall}"
 
-g++ -O2 bxk4f_rseas.cpp -o bxk4f_rseas
-g++ -O2 bxk4f_rmse.cpp -o bxk4f_rmse
-g++ -O2 bxk4one_rseas.cpp -o bxk4one_rseas
-g++ -O2 bxk4one_rmse.cpp -o bxk4one_rmse
+pids=()
+build() {
+    local out="$1"; shift
+    # shellcheck disable=SC2086
+    "$CXX" $CXXFLAGS "$@" -o "$out" &
+    pids+=("$!")
+}
 
-g++ -O2 otb.cpp -o otb2
-g++ -O2 orca.cpp -o orca
-g++ -O2 evs.cpp -o evs
-g++ -O2 evc1.cpp -o evc1
-g++ -O2 evc2.cpp -o evc2
-g++ -O2 evc3.cpp -o evc3
+build cleanup       cleanup.cpp
+build expfy         expfy.cpp
+build onb           onb.cpp
+build bnb           bnb.cpp
+build gen_deg2      gen_deg2.cpp
+
+build bxk4f_rseas   bxk4f_rseas.cpp
+build bxk4f_rmse    bxk4f_rmse.cpp
+build bxk4one_rseas bxk4one_rseas.cpp
+build bxk4one_rmse  bxk4one_rmse.cpp
+
+build otb2          otb.cpp
+build orca          orca.cpp
+build evs           evs.cpp
+build evc1          evc1.cpp
+build evc2          evc2.cpp
+build evc3          evc3.cpp
+
+status=0
+for pid in "${pids[@]}"; do
+    wait "$pid" || status=1
+done
+[ "$status" -eq 0 ] || { echo "build failed" >&2; exit 1; }
 
 chmod +x rpll.sh rpllb.sh

@@ -5,12 +5,14 @@
 
 *.tmp
 
+# Built binaries (see build.sh)
 evc1
 evc2
 evc3
 evs
 expfy
 gen_deg2
+onb
 orca
 otb2
 cleanup
@@ -21,3 +23,19 @@ bxk4one_rseas
 bxk4one_rmse
 
 build/
+
+# Runtime outputs written into the working directory by the pipeline
+data1.txt
+data_middle*.txt
+smth.txt
+vec*.txt
+inp*.txt
+outinp_val_*.txt
+wcic.txt
+PIS*.txt
+tmp_round*.txt
+synth_base_*.txt
+moddeg
+expfy_samples_done.tmp
+.onb_input.*
+.run_round.*
