@@ -77,15 +77,39 @@ void and_or_transform(vector<vector<int>>& adj, int A, int B) {
     // B := A OR B
     //
     // move every such edge A-x to B-x.
+    vector<int> moved;
     for (int x : oldA) {
-        if (!setB.count(x)) {
-            remove_edge(adj, A, x);
-            add_edge(adj, B, x);
+        if (!setB.count(x)) moved.push_back(x);
+    }
+    if (!moved.empty()) {
+        // One order-preserving pass over A instead of one linear erase per
+        // moved neighbour. Adjacency order must match the old per-edge
+        // updates exactly because later samples index into it. No moved x is
+        // already adjacent to B (x is not in setB), so each B-x is new.
+        unordered_set<int> movedSet(moved.begin(), moved.end());
+        adj[A].erase(remove_if(adj[A].begin(), adj[A].end(),
+                               [&](int x) { return movedSet.count(x) != 0; }),
+                     adj[A].end());
+        for (int x : moved) {
+            erase_one(adj[x], A);
+            adj[B].push_back(x);
+            adj[x].push_back(B);
+            deg[x] = (int)adj[x].size();
         }
+        deg[A] = (int)adj[A].size();
+        deg[B] = (int)adj[B].size();
     }
 
     // Restore the sampled A-B edge.
     add_edge(adj, A, B);
+}
+
+// EVC_SEED fixes the RNG for reproducible tests; unset keeps random_device.
+unsigned evc_seed() {
+    const char* text = getenv("EVC_SEED");
+    if (text && *text) return static_cast<unsigned>(strtoul(text, nullptr, 10));
+    random_device rd;
+    return rd();
 }
 
 void sample_edge_prob(vector<vector<int>>& adj, int num_samples) {
@@ -96,8 +120,7 @@ void sample_edge_prob(vector<vector<int>>& adj, int num_samples) {
         return;
     }
 
-    random_device rd;
-    mt19937 gen(rd());
+    mt19937 gen(evc_seed());
 
     uniform_int_distribution<int> node_dist(0, n - 1);
 
@@ -196,6 +219,7 @@ void readGraph(const string& filename, vector<vector<int>>& adj) {
 }
 
 int main(int argc, char* argv[]) {
+    ios::sync_with_stdio(false);
     if (argc < 3) {
         cerr << "Usage: "
              << argv[0]

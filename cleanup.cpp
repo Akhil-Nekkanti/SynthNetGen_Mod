@@ -28,7 +28,7 @@ int main(int argc, char* argv[]) {
     unordered_map<string, int> id_map;
     int id_counter = 0;
 
-    set<pair<int,int>> seen_edges;
+    unordered_set<uint64_t> seen_edges;
     vector<pair<int,int>> edges;
 
     string u, v;
@@ -43,8 +43,8 @@ int main(int argc, char* argv[]) {
 
         if (a > b) swap(a, b);
 
-        if (!seen_edges.count({a, b})) {
-            seen_edges.insert({a, b});
+        const uint64_t key = (static_cast<uint64_t>(a) << 32) | static_cast<uint32_t>(b);
+        if (seen_edges.insert(key).second) {
             edges.push_back({a, b});
         }
     }
@@ -88,7 +88,7 @@ int main(int argc, char* argv[]) {
 
     int largest_comp = max_element(comp_size.begin(), comp_size.end()) - comp_size.begin();
 
-    unordered_map<int,int> new_id;
+    vector<int> new_id(n, -1);
     int new_counter = 0;
 
     for (int i = 0; i < n; i++) {

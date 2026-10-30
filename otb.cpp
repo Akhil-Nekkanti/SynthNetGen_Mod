@@ -2,6 +2,8 @@
 using namespace std;
 
 int main(int argc, char* argv[]) {
+    ios::sync_with_stdio(false);
+    cin.tie(nullptr);
     int k = stoi(argv[1]);
 
 	vector<vector<int>> mp(2);
@@ -34,6 +36,6 @@ done:
 
 	for(int i=0; i<34; i++){
 		if (vis[i])
-			cout << count[i] << " " << i << endl;
+			cout << count[i] << " " << i << '\n';
 	}
 }

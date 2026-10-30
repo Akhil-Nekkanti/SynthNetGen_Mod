@@ -519,7 +519,13 @@ fi
 # PIS uses one target vector, unit weights, and one error range fixed from the
 # graph entering PIS.  The state is initialized for both generated and supplied
 # base graphs because evc1 and evc2 must be compared under the same objective.
-PIS_TARGET_VEC="pis_target_vec.tmp"
+# The PIS target vector is the same onb k vector the main loop uses, so it is
+# written once as vecTar.txt and kept. Absolute because PIS scores evc1 and
+# evc2 candidates concurrently from private scratch directories.
+PIS_TARGET_VEC="$(pwd -P)/vecTar.txt"
+# The target eigenvalue never changes; PIS and every round read this copy.
+TARGET_EV_CACHE="$(pwd -P)/target_ev.txt"
+./evs "$TARGET" > "$TARGET_EV_CACHE"
 PIS_CURRENT_RSEAS=""
 PIS_RSEAS_E=0.0
 declare -a PIS_RSEAS_WEIGHTS=()
@@ -595,11 +601,36 @@ make_pis_increase_candidate() {
     local EVC2_CANDIDATE="${LABEL}_evc2_candidate.txt"
     local EVC1_SCORE EVC2_SCORE
 
-    ./evc1 "$INPUT_GRAPH" "$NUM_SAMPLES" > "$EVC1_CANDIDATE"
-    ./evc2 "$INPUT_GRAPH" "$NUM_SAMPLES" > "$EVC2_CANDIDATE"
-
-    EVC1_SCORE=$(pis_graph_rseas "$EVC1_CANDIDATE")
-    EVC2_SCORE=$(pis_graph_rseas "$EVC2_CANDIDATE")
+    # The two branches are independent, so generate and score them at the same
+    # time. onb writes fixed-name files into its cwd, so each branch runs in
+    # its own scratch directory.
+    local ROOT INPUT_ABS TOOL WORK STATUS=0
+    local -a WORKS=() PIDS=()
+    ROOT=$(pwd -P)
+    INPUT_ABS=$(realpath "$INPUT_GRAPH")
+    for TOOL in evc1 evc2; do
+        WORK=$(mktemp -d "$ROOT/.pis_${TOOL}.XXXXXX")
+        ln -s "$ROOT/onb" "$ROOT/orca" "$ROOT/otb2" "$ROOT/f0.txt" "$WORK/"
+        WORKS+=("$WORK")
+        (
+            cd "$WORK"
+            "$ROOT/$TOOL" "$INPUT_ABS" "$NUM_SAMPLES" > candidate.txt
+            pis_graph_rseas candidate.txt > score.txt
+        ) &
+        PIDS+=("$!")
+    done
+    wait "${PIDS[0]}" || STATUS=1
+    wait "${PIDS[1]}" || STATUS=1
+    if (( STATUS )); then
+        rm -rf -- "${WORKS[@]}"
+        echo "PIS $LABEL: evc1/evc2 candidate generation failed." >&2
+        return 1
+    fi
+    mv "${WORKS[0]}/candidate.txt" "$EVC1_CANDIDATE"
+    mv "${WORKS[1]}/candidate.txt" "$EVC2_CANDIDATE"
+    read -r EVC1_SCORE < "${WORKS[0]}/score.txt"
+    read -r EVC2_SCORE < "${WORKS[1]}/score.txt"
+    rm -rf -- "${WORKS[@]}"
 
     # Prefer evc1 on an exact tie so the old PIS behavior remains the stable
     # tie-breaker. evc2 is selected only when its measured RSEAS is lower.
@@ -633,8 +664,7 @@ rm -f "$local_pis_initial_vec" "$local_pis_initial_displ"
 PIS1_CANDIDATE="PIS1_candidate.txt"
 ./evs "$PRE_INIT_SYNTH" > evh.txt
 read EV1 < evh.txt
-./evs "$TARGET" > evh.txt
-read EV2 < evh.txt
+read EV2 < "$TARGET_EV_CACHE"
 if float_below_by "$EV1" "$EV2" 14; then
     make_pis_increase_candidate "$PRE_INIT_SYNTH" "$PIS1_SAMPLES" PIS1 "$PIS1_CANDIDATE"
 elif float_above_by "$EV1" "$EV2" 14; then
@@ -646,8 +676,7 @@ accept_pis_candidate "$PRE_INIT_SYNTH" "$PIS1_CANDIDATE" PIS1.txt PIS1
 
 ./evs PIS1.txt > evh.txt
 read EV1 < evh.txt
-./evs "$TARGET" > evh.txt
-read EV2 < evh.txt
+read EV2 < "$TARGET_EV_CACHE"
 PIS2_CANDIDATE="PIS2_candidate.txt"
 if float_below_by "$EV1" "$EV2" 7; then
     make_pis_increase_candidate PIS1.txt "$PIS2_SAMPLES" PIS2 "$PIS2_CANDIDATE"
@@ -660,8 +689,7 @@ accept_pis_candidate PIS1.txt "$PIS2_CANDIDATE" PIS2.txt PIS2
 
 ./evs PIS2.txt > evh.txt
 read EV1 < evh.txt
-./evs "$TARGET" > evh.txt
-read EV2 < evh.txt
+read EV2 < "$TARGET_EV_CACHE"
 PIS3_CANDIDATE="PIS3_candidate.txt"
 if float_below_by "$EV1" "$EV2" 2; then
     make_pis_increase_candidate PIS2.txt "$PIS3_SAMPLES" PIS3 "$PIS3_CANDIDATE"
@@ -672,7 +700,6 @@ else
 fi
 accept_pis_candidate PIS2.txt "$PIS3_CANDIDATE" PIS3.txt PIS3
 
-rm -f "$PIS_TARGET_VEC"
 INIT_SYNTH=PIS3.txt
 echo "Baseline ready."
 
@@ -1289,10 +1316,8 @@ run_round() {
         local INPL="$ROOT_DIR/inpl.txt"
         local INP="$ROOT_DIR/inp.txt"
 
-        "$ONB_ABS" "$GRAPHLET_K" "$INPUT_ABS" > "$VEC_INS"
-        "$ONB_ABS" 4 "$INPUT_ABS" > "$ROOT_DIR/bres.tmp"
-        cp "$ROOT_DIR/data_middle.txt" "$ROOT_DIR/data_middle1.txt"
-
+        # The main loop has just run measure_current_graph on INPUT, so
+        # vecInS.txt and data_middle1.txt already describe it.
         displ "$VEC_INS" "$VEC_TAR_ABS" "$INPL"
         cat "$VEC_INS" "$VEC_TAR_ABS" > "$INP"
 
@@ -1312,7 +1337,7 @@ run_round() {
         local CURRENT_EV_FILE="$EVC_DIR/current.ev"
         local TARGET_EV CURRENT_EV
 
-        "$EVS_ABS" "$TARGET_ABS" > "$TARGET_EV_FILE"
+        cp "$TARGET_EV_CACHE" "$TARGET_EV_FILE"
         "$EVS_ABS" "$INPUT_ABS" > "$CURRENT_EV_FILE"
         TARGET_EV=$(read_single_eigenvalue "$TARGET_EV_FILE" "target")
         CURRENT_EV=$(read_single_eigenvalue "$CURRENT_EV_FILE" "current")
@@ -1438,14 +1463,17 @@ run_round() {
         if [ "$BEST_EVC_GRAPH" != "$INPUT_ABS" ]; then
             cp "$BEST_EVC_GRAPH" "$INPUT_ABS"
             had_score="$BEST_EVC_SCORE"
-        fi
 
-        # Recompute the current graph vector after the possible EVC replacement.
-        "$ONB_ABS" "$GRAPHLET_K" "$INPUT_ABS" > "$VEC_INS"
-        "$ONB_ABS" 4 "$INPUT_ABS" > "$ROOT_DIR/bres.tmp"
-        cp "$ROOT_DIR/data_middle.txt" "$ROOT_DIR/data_middle1.txt"
-        displ "$VEC_INS" "$VEC_TAR_ABS" "$INPL"
-        cat "$VEC_INS" "$VEC_TAR_ABS" > "$INP"
+            # Recompute the current graph vector after the EVC replacement.
+            # Without one, the step-1 vectors still describe INPUT.
+            "$ONB_ABS" "$GRAPHLET_K" "$INPUT_ABS" > "$VEC_INS"
+            if (( GRAPHLET_K != 4 )); then
+                "$ONB_ABS" 4 "$INPUT_ABS" > "$ROOT_DIR/bres.tmp"
+            fi
+            cp "$ROOT_DIR/data_middle.txt" "$ROOT_DIR/data_middle1.txt"
+            displ "$VEC_INS" "$VEC_TAR_ABS" "$INPL"
+            cat "$VEC_INS" "$VEC_TAR_ABS" > "$INP"
+        fi
 
         # ---------------------------------------------------------
         # 2. Read all transformation probes once and score every active pair
@@ -1789,8 +1817,6 @@ run_round() {
         fi
 
         printf 'Got %s = %.6g\n' "$ROUND_OBJECTIVE" "$FINAL_SCORE"
-
-        "$ONB_ABS" "$GRAPHLET_K" "$OUTPUT_ABS" > /dev/null
     )
 }
 
@@ -1913,21 +1939,28 @@ generate_outinp() {
         echo "Generated all ${#ACTIVE_CANDS[@]} transformation results."
 }
 
-# Main loop
+# Write vecInS.txt (onb k) and data_middle1.txt (4-node orbits) for GRAPH.
+# For k=4 the vector call already leaves the orbit table in data_middle.txt.
+measure_current_graph() {
+    ./onb "$GRAPHLET_K" "$1" > vecInS.txt
+    if (( GRAPHLET_K != 4 )); then
+        ./onb 4 "$1" > bres.tmp
+    fi
+    cat data_middle.txt > data_middle1.txt
+}
+
+# Main loop. vecTar.txt was written once before PIS.
 CURRENT="$INIT_SYNTH"
-./onb "$GRAPHLET_K" "$TARGET" > vecTar.txt
 
 # Phase 1: the requested number of dynamic-weight RSEAS rounds. Probe curves
 # are regenerated on rounds 1, 1+RBGO, 1+2*RBGO, ... within this phase.
 for ((i=1; i<=ROUNDS; i++)); do
     echo "RSEAS round $i/$ROUNDS."
     set_round_constraints "$i"
-    ./onb "$GRAPHLET_K" "$CURRENT" > vecInS.txt
+    measure_current_graph "$CURRENT"
     set_round_rseas_state "$i" vecInS.txt vecTar.txt
 
     if (( (i-1) % RBGO == 0 )); then
-        ./onb 4 "$CURRENT" > bres.tmp
-        cat data_middle.txt > data_middle1.txt
         refresh_rare_graphlets data_middle1.txt
         generate_outinp "$CURRENT"
     fi
@@ -1947,11 +1980,9 @@ hdgb="$TIGHTEST_HDGB"
 for ((j=1; j<=RMSE_ROUNDS; j++)); do
     echo "RMSE round $j/$RMSE_ROUNDS."
     set_rmse_round_constraints "$j"
+    measure_current_graph "$CURRENT"
 
     if (( (j-1) % RBGO == 0 )); then
-        ./onb "$GRAPHLET_K" "$CURRENT" > vecInS.txt
-        ./onb 4 "$CURRENT" > bres.tmp
-        cat data_middle.txt > data_middle1.txt
         refresh_rare_graphlets data_middle1.txt
         generate_outinp "$CURRENT"
     fi

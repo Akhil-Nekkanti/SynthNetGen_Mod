@@ -18,6 +18,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 /* g++ -O2 -std=c++11 -o orca orca.cpp or use g++ -O2 -std=c++0x -o orca orca.cpp */
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -45,9 +46,16 @@ bool operator<(const PAIR &x, const PAIR &y) {
 bool operator==(const PAIR &x, const PAIR &y) {
 	return x.a==y.a && x.b==y.b;
 }
+static inline size_t mix64(uint64_t z) {
+	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+	z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+	return (size_t)(z ^ (z >> 31));
+}
 struct hash_PAIR {
 	size_t operator()(const PAIR &x) const {
-		return (x.a<<8) ^ (x.b<<0);
+		// Pack both ids into 64 bits and mix; the old (a<<8)^b collided heavily
+		// once n > 256 and overflowed a signed int for large ids.
+		return mix64(((uint64_t)(uint32_t)x.a << 32) | (uint32_t)x.b);
 	}
 };
 
@@ -71,7 +79,7 @@ bool operator==(const TRIPLE &x, const TRIPLE &y) {
 }
 struct hash_TRIPLE {
 	size_t operator()(const TRIPLE &x) const {
-		return (x.a<<16) ^ (x.b<<8) ^ (x.c<<0);
+		return mix64(((uint64_t)(uint32_t)x.a << 42) ^ ((uint64_t)(uint32_t)x.b << 21) ^ (uint32_t)x.c);
 	}
 };
 
@@ -762,7 +770,7 @@ void writeResults(int g=5) {
 			if (j!=0) fout << " ";
 			fout << orbit[i][j];
 		}
-		fout << endl;
+		fout << '\n';
 	}
 	fout.close();
 }

@@ -1852,6 +1852,24 @@ public:
 private:
     // Independent learner/cutoff per requested inverse; mode 73 remains intact.
     map<int,InverseState> inverse_states_;
+    // std::map element addresses are stable, so the (at most two) modes looked
+    // up on every sampling attempt are cached instead of re-searching the map.
+    mutable array<pair<int,InverseState*>,2> inverse_cache_{};
+    InverseState* find_inverse_state(int mode) const {
+        for (const auto& entry : inverse_cache_)
+            if (entry.second && entry.first == mode) return entry.second;
+        const auto it = inverse_states_.find(mode);
+        if (it == inverse_states_.end()) return nullptr;
+        InverseState* state = const_cast<InverseState*>(&it->second);
+        for (auto& entry : inverse_cache_)
+            if (!entry.second) { entry = {mode, state}; break; }
+        return state;
+    }
+    InverseState& inverse_state_at(int mode) {
+        InverseState* state = find_inverse_state(mode);
+        if (!state) throw out_of_range("inverse state not prepared");
+        return *state;
+    }
     static constexpr bool INVERSE_SOURCE_SPACE = true;
 
     bool apply_inverse_operations(const InverseOperations& o,bool commit,
@@ -2013,7 +2031,7 @@ private:
     }
 
     void apply_learned_inverse(int mode,const array<int,5>& nodes,const Sub4& sub) {
-        auto& state=inverse_states_.at(mode);if(!state.enabled)return;
+        auto& state=inverse_state_at(mode);if(!state.enabled)return;
         const auto& spec=inverse_spec(mode);const auto& match=spec.target_matches[inverse_mask(sub)];
         if(!match.valid){++state.structure_reject;return;}
         ++state.candidates;
@@ -2442,8 +2460,8 @@ private:
         const int mode = slot == 0 ? mode1_ : mode2_;
         if (mode == 73 && prepared73_ && !enabled73_) return false;
         if (is_new_inverse(mode)) {
-            const auto it = inverse_states_.find(mode);
-            if (it != inverse_states_.end() && it->second.prepared && !it->second.enabled) return false;
+            const InverseState* state = find_inverse_state(mode);
+            if (state && state->prepared && !state->enabled) return false;
         }
         return slot == 0 ? done1_ < requested1_ : done2_ < requested2_;
     }
@@ -3088,7 +3106,7 @@ private:
 
     void sample_one(int mode) {
         if (is_new_inverse(mode)) {
-            auto& state = inverse_states_.at(mode);
+            auto& state = inverse_state_at(mode);
             if (!state.enabled) return;
             ++state.attempts;
         }
