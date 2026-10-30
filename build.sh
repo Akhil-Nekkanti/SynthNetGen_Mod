@@ -25,13 +25,13 @@ build onb           onb.cpp
 build bnb           bnb.cpp
 build gen_deg2      gen_deg2.cpp
 
-build bxk4f_rseas   bxk4f_rseas.cpp
-build bxk4f_rmse    bxk4f_rmse.cpp
+build bxk4f_rseas   bxk4f_rseas.cpp -pthread
+build bxk4f_rmse    bxk4f_rmse.cpp -pthread
 build bxk4one_rseas bxk4one_rseas.cpp
 build bxk4one_rmse  bxk4one_rmse.cpp
 
 build otb2          otb.cpp
-build orca          orca.cpp
+build orca          orca.cpp -fopenmp
 build evs           evs.cpp
 build evc1          evc12.cpp
 build evc2          evc12.cpp -DEVC_DESC

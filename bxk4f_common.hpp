@@ -314,35 +314,91 @@ inline string scale_text(double scale) {
 
 inline bool text_is_zero(const string& text) { return text == "0" || text == "-0"; }
 
+// BXK_THREADS (default 1, capped at 4) splits the pair searches across
+// threads. Pairs are independent, each search stays serial (so its strict
+// first-minimum tie-break is unchanged) and results print in (i, j) order,
+// so the output is byte-identical for any thread count.
+constexpr int MAX_THREADS = 4;
+
+inline int thread_count(size_t work_items) {
+    const char* text = getenv("BXK_THREADS");
+    int threads = text && *text ? atoi(text) : 1;
+    threads = max(1, min(threads, MAX_THREADS));
+    return static_cast<int>(min<size_t>(threads, max<size_t>(work_items, 1)));
+}
+
 template <typename Score>
 void write_round_results(vector<Transformation>& transformations,
                          double baseline_score, const Score& score) {
     if (!isfinite(baseline_score)) throw runtime_error("nonfinite baseline score");
     ostringstream output;
     output << fixed << setprecision(17);
-    size_t pairs = 0, bad_pairs = 0, active_count = 0;
+    size_t bad_pairs = 0, active_count = 0;
     for (const auto& t : transformations) if (t.enabled) ++active_count;
 
+    vector<pair<size_t, size_t>> pair_list;
     for (size_t i = 0; i < transformations.size(); ++i) {
-        auto& first = transformations[i];
-        if (!first.enabled) continue;
+        if (!transformations[i].enabled) continue;
         for (size_t j = 0; j <= i; ++j) {
-            auto& second = transformations[j];
-            if (!second.enabled) continue;
-            const SearchResult best = minimize_pair(first, second, baseline_score, score);
-            const string x = scale_text(best.x);
-            const string y = scale_text(best.y);
-            ++pairs;
-            if (first.id != second.id && (text_is_zero(x) || text_is_zero(y))) {
-                ++bad_pairs;
-                output << "BAD_ZERO_SCALE|" << first.id << '|' << second.id
-                       << '|' << x << '|' << y << '|' << best.score << '\n';
-            } else {
-                output << best.score << '|' << first.id << '|' << second.id
-                       << '|' << x << '|' << y << '\n';
-            }
+            if (transformations[j].enabled) pair_list.push_back({i, j});
         }
     }
+
+    vector<SearchResult> results(pair_list.size());
+    const int threads = thread_count(pair_list.size());
+    // Pair p goes to thread p % threads. A thread stops at its first error,
+    // and the lowest failing pair is rethrown, as the serial loop would.
+    auto search = [&](int thread_index, vector<Transformation>& table,
+                      size_t& failed_at, exception_ptr& error) {
+        for (size_t p = thread_index; p < pair_list.size(); p += threads) {
+            try {
+                results[p] = minimize_pair(table[pair_list[p].first],
+                                           table[pair_list[p].second],
+                                           baseline_score, score);
+            } catch (...) {
+                failed_at = p;
+                error = current_exception();
+                return;
+            }
+        }
+    };
+    vector<size_t> failed_at(threads, numeric_limits<size_t>::max());
+    vector<exception_ptr> errors(threads);
+    if (threads == 1) {
+        search(0, transformations, failed_at[0], errors[0]);
+    } else {
+        // Each thread fills a private displacement cache; displacement() is
+        // pure, so cached values match the serial run exactly.
+        vector<vector<Transformation>> tables(threads - 1, transformations);
+        vector<thread> pool;
+        for (int t = 1; t < threads; ++t) {
+            pool.emplace_back(search, t, ref(tables[t - 1]),
+                              ref(failed_at[t]), ref(errors[t]));
+        }
+        search(0, transformations, failed_at[0], errors[0]);
+        for (auto& worker : pool) worker.join();
+    }
+    const auto first_failure = min_element(failed_at.begin(), failed_at.end());
+    if (*first_failure != numeric_limits<size_t>::max()) {
+        rethrow_exception(errors[first_failure - failed_at.begin()]);
+    }
+
+    for (size_t p = 0; p < pair_list.size(); ++p) {
+        const auto& first = transformations[pair_list[p].first];
+        const auto& second = transformations[pair_list[p].second];
+        const SearchResult& best = results[p];
+        const string x = scale_text(best.x);
+        const string y = scale_text(best.y);
+        if (first.id != second.id && (text_is_zero(x) || text_is_zero(y))) {
+            ++bad_pairs;
+            output << "BAD_ZERO_SCALE|" << first.id << '|' << second.id
+                   << '|' << x << '|' << y << '|' << best.score << '\n';
+        } else {
+            output << best.score << '|' << first.id << '|' << second.id
+                   << '|' << x << '|' << y << '\n';
+        }
+    }
+    const size_t pairs = pair_list.size();
     // No partial result table is published if parsing/scoring fails.
     cout << output.str();
     cout.flush();

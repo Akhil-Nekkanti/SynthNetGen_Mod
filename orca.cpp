@@ -105,6 +105,14 @@ bool (*adjacent)(int,int);
 
 int64 **orbit; // orbit[x][o] - how many times does node x participate in orbit o
 
+// ORCA_THREADS (default 1, capped at 4) threads the per-node equation stage.
+// Without -fopenmp the pragmas are ignored and orca runs serially.
+int orca_threads() {
+	const char *text = getenv("ORCA_THREADS");
+	int threads = (text && *text) ? atoi(text) : 1;
+	return threads < 1 ? 1 : (threads > 4 ? 4 : threads);
+}
+
 
 /** count graphlets on max 4 nodes */
 void count4() {
@@ -359,20 +367,31 @@ void count5() {
 	printf("%.2f sec\n", (double)(endTime-startTime)/CLOCKS_PER_SEC);
 	startTime = endTime;
 
+	// set up a system of equations relating orbit counts
+	printf("stage 3 - building systems of equations\n");
+	frac_prev=-1;
+	// Each node's equations read shared, already-final data (adjacency, tri,
+	// C5, common2/common3) and write only orbit[x], with integer arithmetic,
+	// so splitting nodes across ORCA_THREADS threads gives identical output.
+	// Scratch arrays and the common*_get iterators are per thread.
+	const int threads = orca_threads();
+	#pragma omp parallel num_threads(threads)
+	{
+	unordered_map<PAIR, int, hash_PAIR>::iterator common2_it;
+	unordered_map<TRIPLE, int, hash_TRIPLE>::iterator common3_it;
 	int *common_x = (int*)calloc(n,sizeof(int));
 	int *common_x_list = (int*)malloc(n*sizeof(int)), ncx=0;
 	int *common_a = (int*)calloc(n,sizeof(int));
 	int *common_a_list = (int*)malloc(n*sizeof(int)), nca=0;
-
-	// set up a system of equations relating orbit counts
-	printf("stage 3 - building systems of equations\n");
-	frac_prev=-1;
+	#pragma omp for schedule(dynamic,64)
 	for (int x=0;x<n;x++) {
-		frac = 100LL*x/n;
-		if (frac!=frac_prev) {
-			printf("%d%%\r",frac);
-			fflush(stdout);
-			frac_prev=frac;
+		if (threads == 1) {
+			frac = 100LL*x/n;
+			if (frac!=frac_prev) {
+				printf("%d%%\r",frac);
+				fflush(stdout);
+				frac_prev=frac;
+			}
 		}
 
 		for (int i=0;i<ncx;i++) common_x[common_x_list[i]]=0;
@@ -668,6 +687,8 @@ void count5() {
 		orbit[x][16] = (f_16-1*orbit[x][59]-2*orbit[x][52]-1*orbit[x][51]-2*orbit[x][46]-2*orbit[x][36]-2*orbit[x][34]-1*orbit[x][29]);
 		orbit[x][15] = (f_15-1*orbit[x][59]-2*orbit[x][52]-1*orbit[x][51]-2*orbit[x][45]-2*orbit[x][35]-2*orbit[x][34]-2*orbit[x][27]);
 	}
+	free(common_x); free(common_x_list); free(common_a); free(common_a_list);
+	} // omp parallel
 	endTime = clock();
 	printf("%.2f sec\n", (double)(endTime-startTime)/CLOCKS_PER_SEC);
 

@@ -5,6 +5,35 @@ SCMD_PROJECT_DIR=$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")
 source "$SCMD_PROJECT_DIR/pipeline_runtime.sh"
 source "$SCMD_PROJECT_DIR/disabled_config.sh"
 
+# At most THREAD_BUDGET (default 4) threads run at once. Serial steps let
+# orca (ORCA_THREADS) and the bxk4f pair search (BXK_THREADS) use the whole
+# budget; inside a pool of N parallel workers each orca gets budget/N.
+# Thread counts never change results: both tools are byte-identical for any
+# thread count.
+THREAD_BUDGET="${THREAD_BUDGET:-4}"
+export ORCA_THREADS="${ORCA_THREADS:-$THREAD_BUDGET}"
+export BXK_THREADS="${BXK_THREADS:-$THREAD_BUDGET}"
+
+worker_threads() {
+    local THREADS=$((THREAD_BUDGET / $1))
+    echo $((THREADS > 0 ? THREADS : 1))
+}
+
+# Job pool: block until fewer than MAX jobs are running. wait -n returns as
+# soon as any job finishes, so one slow job does not leave other slots idle.
+# Results are always read back by label or rank, never in completion order.
+pool_wait_slot() {
+    local -n POOL_RUNNING_REF="$1" POOL_FAILED_REF="$2"
+    while (( POOL_RUNNING_REF >= $3 )); do
+        wait -n || POOL_FAILED_REF=1
+        POOL_RUNNING_REF=$((POOL_RUNNING_REF - 1))
+    done
+}
+
+pool_wait_all() {
+    pool_wait_slot "$1" "$2" 1
+}
+
 # Node-dependent work is calibrated to a 1,000-node graph.  EFFECTIVE_N is
 # clamped so small graphs still get enough trials for stable estimates while
 # large graphs cannot make every candidate evaluation arbitrarily expensive.
@@ -614,6 +643,8 @@ make_pis_increase_candidate() {
         WORKS+=("$WORK")
         (
             cd "$WORK"
+            export ORCA_THREADS
+            ORCA_THREADS=$(worker_threads 2)
             "$ROOT/$TOOL" "$INPUT_ABS" "$NUM_SAMPLES" > candidate.txt
             pis_graph_rseas candidate.txt > score.txt
         ) &
@@ -782,9 +813,11 @@ column_graphlet=(0 0 0 0 6 6 5 5 8 7 7 7 9 9 10)
 declare -a graphlet_node_count
 declare -a rare_graphlet
 
-# Number of simultaneous workers used by generate_outinp.
-# Override when launching, for example: PARALLEL_JOBS=4 ./rpll.sh ...
-PARALLEL_JOBS="${PARALLEL_JOBS:-2}"
+# Number of simultaneous workers used by generate_outinp. The default fills the
+# THREAD_BUDGET with single-threaded expfy workers (measured ~1.85x faster
+# than 2 workers on expfy-bound probe generation).
+# Override when launching, for example: PARALLEL_JOBS=2 ./rpll.sh ...
+PARALLEL_JOBS="${PARALLEL_JOBS:-$THREAD_BUDGET}"
 
 # Number of simultaneous workers used inside run_round.  By default it uses
 # the same limit as generate_outinp, but it can be tuned independently.
@@ -1355,9 +1388,9 @@ run_round() {
             EVC_TOOLS+=("evc$EVC_ID" "evc$EVC_ID")
             EVC_AMOUNTS+=("$OUTPEV_SMALL_SAMPLES" "$OUTPEV_LARGE_SAMPLES")
         done
-        local -a EVC_PIDS=()
+        local EVC_RUNNING=0
         local EVC_FAILED=0
-        local IDX LABEL TOOL AMOUNT PID
+        local IDX LABEL TOOL AMOUNT
 
         for IDX in "${!EVC_LABELS[@]}"; do
             LABEL="${EVC_LABELS[$IDX]}"
@@ -1366,6 +1399,8 @@ run_round() {
 
             (
                 set -e
+                export ORCA_THREADS
+                ORCA_THREADS=$(worker_threads "$MAX_JOBS")
                 local WORK_DIR="$EVC_DIR/work_$LABEL"
                 prepare_parallel_worker "$WORK_DIR" "$ROOT_DIR"
                 trap 'rm -rf -- "$WORK_DIR"' EXIT
@@ -1413,21 +1448,10 @@ run_round() {
                     > "$EVC_DIR/$LABEL.result.tmp"
                 mv "$EVC_DIR/$LABEL.result.tmp" "$EVC_DIR/$LABEL.result"
             ) &
-            EVC_PIDS+=("$!")
-
-            if (( ${#EVC_PIDS[@]} >= MAX_JOBS )); then
-                if ! wait "${EVC_PIDS[0]}"; then
-                    EVC_FAILED=1
-                fi
-                EVC_PIDS=("${EVC_PIDS[@]:1}")
-            fi
+            EVC_RUNNING=$((EVC_RUNNING + 1))
+            pool_wait_slot EVC_RUNNING EVC_FAILED "$MAX_JOBS"
         done
-
-        for PID in "${EVC_PIDS[@]}"; do
-            if ! wait "$PID"; then
-                EVC_FAILED=1
-            fi
-        done
+        pool_wait_all EVC_RUNNING EVC_FAILED
 
         if (( EVC_FAILED )); then
             echo "At least one parallel EVC evaluation failed." >&2
@@ -1557,7 +1581,7 @@ run_round() {
             exit 1
         fi
 
-        local -a TOP_PIDS=()
+        local TOP_RUNNING=0
         local TOP_FAILED=0
         local RANK LINE
         local sorted_score sorted_VAL sorted_VAL2 sorted_MAG sorted_MAG2
@@ -1586,6 +1610,8 @@ run_round() {
 
             (
                 set -e
+                export ORCA_THREADS
+                ORCA_THREADS=$(worker_threads "$MAX_JOBS")
                 local WORK_DIR="$TOP_DIR/work_$RANK"
                 prepare_parallel_worker "$WORK_DIR" "$ROOT_DIR"
                 trap 'rm -rf -- "$WORK_DIR"' EXIT
@@ -1651,21 +1677,10 @@ run_round() {
                 mv "$TOP_DIR/result_$(printf '%02d' "$RANK").tmp" \
                    "$TOP_DIR/result_$(printf '%02d' "$RANK").txt"
             ) &
-            TOP_PIDS+=("$!")
-
-            if (( ${#TOP_PIDS[@]} >= MAX_JOBS )); then
-                if ! wait "${TOP_PIDS[0]}"; then
-                    TOP_FAILED=1
-                fi
-                TOP_PIDS=("${TOP_PIDS[@]:1}")
-            fi
+            TOP_RUNNING=$((TOP_RUNNING + 1))
+            pool_wait_slot TOP_RUNNING TOP_FAILED "$MAX_JOBS"
         done
-
-        for PID in "${TOP_PIDS[@]}"; do
-            if ! wait "$PID"; then
-                TOP_FAILED=1
-            fi
-        done
+        pool_wait_all TOP_RUNNING TOP_FAILED
 
         if (( TOP_FAILED )); then
             echo "At least one parallel top-pair evaluation failed." >&2
@@ -1837,13 +1852,15 @@ generate_outinp() {
                 return 1
         fi
 
-        local -a PIDS=()
+        local RUNNING=0
         local FAILED=0
         local VAL
 
         for VAL in "${ACTIVE_CANDS[@]}"; do
                 (
                         set -e
+                        export ORCA_THREADS
+                        ORCA_THREADS=$(worker_threads "$MAX_JOBS")
 
                         local WORK_DIR
                         WORK_DIR=$(mktemp -d "$ROOT_DIR/.generate_outinp_${VAL}.XXXXXX")
@@ -1888,7 +1905,6 @@ generate_outinp() {
                         apply_exp "$INS_ABS" "$SCALE" "$VAL" "$BASE_SYNTH2" \
                             TESTED_SCALE2
                         ./onb "$GRAPHLET_K" "$BASE_SYNTH2" > "vecBS2_val_${VAL}.txt"
-#set +x
                         displ "$VEC_INS_ABS" "vecBS2_val_${VAL}.txt" "trfBS2_val_${VAL}.txt"
 
                         # Each transformation file is self-contained:
@@ -1913,24 +1929,13 @@ generate_outinp() {
                         mv "$OUT_INP" "$ROOT_DIR/outinp_val_${VAL}.txt"
                 ) &
 
-                PIDS+=("$!")
-
                 # Keep at most MAX_JOBS candidates alive at once.
-                if (( ${#PIDS[@]} >= MAX_JOBS )); then
-                        if ! wait "${PIDS[0]}"; then
-                                FAILED=1
-                        fi
-                        PIDS=("${PIDS[@]:1}")
-                fi
+                RUNNING=$((RUNNING + 1))
+                pool_wait_slot RUNNING FAILED "$MAX_JOBS"
         done
 
         # Wait for the final partial batch.
-        local PID
-        for PID in "${PIDS[@]}"; do
-                if ! wait "$PID"; then
-                        FAILED=1
-                fi
-        done
+        pool_wait_all RUNNING FAILED
 
         if (( FAILED )); then
                 echo "At least one parallel generate_outinp job failed." >&2
