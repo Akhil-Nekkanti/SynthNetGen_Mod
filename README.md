@@ -55,8 +55,8 @@ Example: `./rpll.sh 4 target.el out.el 10 2 3`
   of exact ORCA counts.
 - It still uses ORCA for the 4-node orbit table that guides expfy's node
   selection, recomputed once per input graph.
-- It runs probes and round candidates in parallel like `rpll.sh`
-  (`PARALLEL_JOBS`, `ROUND_JOBS`; default 2 workers).
+- Its candidate stages run in parallel, with the same job pool and thread
+  budget as `rpll.sh`.
 - It needs the `blant` binary, `canon_maps/` and `orca_jesse_blant_table/`
   in the project directory (or in `Synthcheck/`).
 
@@ -66,7 +66,8 @@ Use it for dense graphs where exact counting is too slow.
 
 `disabled.txt` must have exactly two lines:
 
-1. Transformation IDs (1–95) to skip. The shipped file disables 61–95.
+1. Transformation IDs (1–95) to skip. The shipped file disables 25, 26 and
+   61–95 (25 and 26 are never implemented, so they are always skipped).
 2. EVC tools (1–3) to skip, or a single `0` to skip none.
 
 Both pipelines and the `bxk4f` tools read it. Each run snapshots it at start.
@@ -83,6 +84,13 @@ Both scripts source `pipeline_runtime.sh`, which:
 
 `EXPFY_BIN` selects the expfy binary (default `./expfy`).
 
+### Job pool: `job_pool.sh`
+
+Both scripts also source `job_pool.sh`. It sets the thread budget (see below)
+and provides the background-job pool. As soon as any job finishes, the next
+one starts (`wait -n`). Results are always read back by label or rank, so
+scheduling never changes the output.
+
 ## Environment variables
 
 | Variable | Default | Effect |
@@ -96,7 +104,7 @@ Both scripts source `pipeline_runtime.sh`, which:
 | `EXPFY_BIN` | `./expfy` | expfy binary to use (for example a build of `expfy_rev.cpp`). |
 | `TMPDIR` | `/tmp` | Where the private run directory is created. |
 | `EXPFY73_DATA_ATTEMPTS`, `EXPFY73_MIN_PRECISION`, `EXPFY73_C`, `EXPFY73_MAX_ITERS`, `EXPFY73_BOTH`, `EXPFY73_DUMP_DIR` | see `expfy.cpp` | Training settings for the learned modes 73–95. |
-| `EVC_SEED`, `GEN_DEG_SEED` | random | Test-only seeds for evc1/2/3 and gen_deg2. |
+| `EVC_SEED`, `GEN_DEG_SEED`, `BNB_SEED` | random | Test-only seeds for evc1/2/3, gen_deg2 and BLANT sampling in bnb. Set them together with `EXPFY_SEED` and a whole run is reproducible. |
 
 Thread counts never change results. orca and bxk4f produce byte-identical
 output for any thread count.
@@ -130,7 +138,7 @@ output for any thread count.
 |---|---|---|
 | `cleanup` | cleanup.cpp | Keep the largest connected component, deduplicate edges, relabel nodes 0..n-1. |
 | `gen_deg2` | gen_deg2.cpp | Random connected graph with a given degree sequence (spanning tree + Chung–Lu). |
-| `orca` | orca.cpp | Exact per-node orbit counts for 4- or 5-node graphlets (ORCA). |
+| `orca` | orca.cpp | Exact per-node orbit counts for 4- or 5-node graphlets (ORCA, modified). k=5 requires fewer than 2,097,152 nodes. |
 | `otb2` | otb.cpp | Convert orca orbit counts into graphlet counts. |
 | `onb` | onb.cpp | Run orca + otb2 on an edge list and print the normalized graphlet vector. It also leaves `data_middle.txt` (orbits). |
 | `bnb` | bnb.cpp | Same as onb, but uses BLANT sampling (rpllb). |

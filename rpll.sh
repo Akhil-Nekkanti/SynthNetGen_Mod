@@ -4,35 +4,7 @@ set -e
 SCMD_PROJECT_DIR=$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")
 source "$SCMD_PROJECT_DIR/pipeline_runtime.sh"
 source "$SCMD_PROJECT_DIR/disabled_config.sh"
-
-# At most THREAD_BUDGET (default 4) threads run at once. Serial steps let
-# orca (ORCA_THREADS) and the bxk4f pair search (BXK_THREADS) use the whole
-# budget; inside a pool of N parallel workers each orca gets budget/N.
-# Thread counts never change results: both tools are byte-identical for any
-# thread count.
-THREAD_BUDGET="${THREAD_BUDGET:-4}"
-export ORCA_THREADS="${ORCA_THREADS:-$THREAD_BUDGET}"
-export BXK_THREADS="${BXK_THREADS:-$THREAD_BUDGET}"
-
-worker_threads() {
-    local THREADS=$((THREAD_BUDGET / $1))
-    echo $((THREADS > 0 ? THREADS : 1))
-}
-
-# Job pool: block until fewer than MAX jobs are running. wait -n returns as
-# soon as any job finishes, so one slow job does not leave other slots idle.
-# Results are always read back by label or rank, never in completion order.
-pool_wait_slot() {
-    local -n POOL_RUNNING_REF="$1" POOL_FAILED_REF="$2"
-    while (( POOL_RUNNING_REF >= $3 )); do
-        wait -n || POOL_FAILED_REF=1
-        POOL_RUNNING_REF=$((POOL_RUNNING_REF - 1))
-    done
-}
-
-pool_wait_all() {
-    pool_wait_slot "$1" "$2" 1
-}
+source "$SCMD_PROJECT_DIR/job_pool.sh"
 
 # Node-dependent work is calibrated to a 1,000-node graph.  EFFECTIVE_N is
 # clamped so small graphs still get enough trials for stable estimates while
@@ -895,7 +867,10 @@ prepare_parallel_worker() {
     # Linking every project executable keeps those calls working inside the
     # private directory without sharing their generated scratch files.
     for TOOL in "$ROOT_DIR"/*; do
-        if [ ! -f "$TOOL" ]; then
+        # Skip non-files and names already copied above: on filesystems that
+        # mark every file executable (e.g. a Windows checkout under /mnt/c),
+        # f0.txt would otherwise be linked over its own copy.
+        if [ ! -f "$TOOL" ] || [ -e "$WORK_DIR/${TOOL##*/}" ]; then
             continue
         fi
 

@@ -4,6 +4,7 @@ set -e
 SCMD_PROJECT_DIR=$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")
 source "$SCMD_PROJECT_DIR/pipeline_runtime.sh"
 source "$SCMD_PROJECT_DIR/disabled_config.sh"
+source "$SCMD_PROJECT_DIR/job_pool.sh"
 
 # Prepare four-node orbits for the next expfy input in the current directory.
 # Call once per fixed input, then reuse/copy the data across its probes.
@@ -43,7 +44,8 @@ EOF_ORCA_INPUT
     ) || exit 1
 
     "$SCMD_PROJECT_DIR/orca" 4 "$ORCA_INPUT" "$ORCA_OUTPUT" > smth.txt || exit 1
-    # Some ORCA failures return zero: reject empty, partial or malformed output.
+    # orca exits nonzero on rejected input; still reject empty, partial or
+    # malformed output in case it exits zero without writing every row.
     if ! awk -v N="$ORBIT_NODE_COUNT" '
         NF != 15 { bad = 1 }
         { for (i = 1; i <= NF; ++i) if ($i !~ /^[0-9]+$/) bad = 1 }
@@ -812,8 +814,9 @@ declare -a graphlet_node_count
 declare -a rare_graphlet
 
 # Limit simultaneous transformation probes and round candidates independently.
+# The default fills THREAD_BUDGET (job_pool.sh) with single-threaded workers.
 # For example: PARALLEL_JOBS=4 ROUND_JOBS=2 ./rpllb.sh ...
-PARALLEL_JOBS="${PARALLEL_JOBS:-2}"
+PARALLEL_JOBS="${PARALLEL_JOBS:-$THREAD_BUDGET}"
 ROUND_JOBS="${ROUND_JOBS:-$PARALLEL_JOBS}"
 
 declare -a ec
@@ -886,7 +889,10 @@ prepare_parallel_worker() {
     # Other tools can still use project-local executables in this directory.
     # run_bnb explicitly selects BLANT_RESOURCE_DIR for BLANT and its resources.
     for TOOL in "$ROOT_DIR"/*; do
-        if [ ! -f "$TOOL" ]; then
+        # Skip non-files and names already copied above: on filesystems that
+        # mark every file executable (e.g. a Windows checkout under /mnt/c),
+        # f0.txt would otherwise be linked over its own copy.
+        if [ ! -f "$TOOL" ] || [ -e "$WORK_DIR/${TOOL##*/}" ]; then
             continue
         fi
 
@@ -1378,9 +1384,9 @@ run_round() {
             EVC_TOOLS+=("evc$EVC_ID" "evc$EVC_ID")
             EVC_AMOUNTS+=("$OUTPEV_SMALL_SAMPLES" "$OUTPEV_LARGE_SAMPLES")
         done
-        local -a EVC_PIDS=()
+        local EVC_RUNNING=0
         local EVC_FAILED=0
-        local IDX LABEL TOOL AMOUNT PID
+        local IDX LABEL TOOL AMOUNT
 
         for IDX in "${!EVC_LABELS[@]}"; do
             LABEL="${EVC_LABELS[$IDX]}"
@@ -1436,21 +1442,10 @@ run_round() {
                     > "$EVC_DIR/$LABEL.result.tmp"
                 mv "$EVC_DIR/$LABEL.result.tmp" "$EVC_DIR/$LABEL.result"
             ) &
-            EVC_PIDS+=("$!")
-
-            if (( ${#EVC_PIDS[@]} >= MAX_JOBS )); then
-                if ! wait "${EVC_PIDS[0]}"; then
-                    EVC_FAILED=1
-                fi
-                EVC_PIDS=("${EVC_PIDS[@]:1}")
-            fi
+            EVC_RUNNING=$((EVC_RUNNING + 1))
+            pool_wait_slot EVC_RUNNING EVC_FAILED "$MAX_JOBS"
         done
-
-        for PID in "${EVC_PIDS[@]}"; do
-            if ! wait "$PID"; then
-                EVC_FAILED=1
-            fi
-        done
+        pool_wait_all EVC_RUNNING EVC_FAILED
 
         if (( EVC_FAILED )); then
             echo "At least one parallel EVC evaluation failed." >&2
@@ -1579,7 +1574,7 @@ run_round() {
             exit 1
         fi
 
-        local -a TOP_PIDS=()
+        local TOP_RUNNING=0
         local TOP_FAILED=0
         local RANK LINE
         local sorted_score sorted_VAL sorted_VAL2 sorted_MAG sorted_MAG2
@@ -1673,21 +1668,10 @@ run_round() {
                 mv "$TOP_DIR/result_$(printf '%02d' "$RANK").tmp" \
                    "$TOP_DIR/result_$(printf '%02d' "$RANK").txt"
             ) &
-            TOP_PIDS+=("$!")
-
-            if (( ${#TOP_PIDS[@]} >= MAX_JOBS )); then
-                if ! wait "${TOP_PIDS[0]}"; then
-                    TOP_FAILED=1
-                fi
-                TOP_PIDS=("${TOP_PIDS[@]:1}")
-            fi
+            TOP_RUNNING=$((TOP_RUNNING + 1))
+            pool_wait_slot TOP_RUNNING TOP_FAILED "$MAX_JOBS"
         done
-
-        for PID in "${TOP_PIDS[@]}"; do
-            if ! wait "$PID"; then
-                TOP_FAILED=1
-            fi
-        done
+        pool_wait_all TOP_RUNNING TOP_FAILED
 
         if (( TOP_FAILED )); then
             echo "At least one parallel top-pair evaluation failed." >&2
@@ -1853,7 +1837,7 @@ generate_outinp() {
                 return 1
         fi
 
-        local -a PIDS=()
+        local RUNNING=0
         local FAILED=0
         local VAL
 
@@ -1910,22 +1894,10 @@ generate_outinp() {
                         # mv is atomic on the same filesystem, so run_round never sees a half-written file.
                         mv "$OUT_INP" "$ROOT_DIR/outinp_val_${VAL}.txt"
                 ) &
-                PIDS+=("$!")
-
-                if (( ${#PIDS[@]} >= MAX_JOBS )); then
-                        if ! wait "${PIDS[0]}"; then
-                                FAILED=1
-                        fi
-                        PIDS=("${PIDS[@]:1}")
-                fi
+                RUNNING=$((RUNNING + 1))
+                pool_wait_slot RUNNING FAILED "$MAX_JOBS"
         done
-
-        local PID
-        for PID in "${PIDS[@]}"; do
-                if ! wait "$PID"; then
-                        FAILED=1
-                fi
-        done
+        pool_wait_all RUNNING FAILED
 
         if (( FAILED )); then
                 echo "At least one parallel generate_outinp job failed." >&2
