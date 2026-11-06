@@ -1699,6 +1699,11 @@ void inverse_dump_roles(ostream& out,const InverseSpec& s,bool source_space) {
 
 class Sampler {
 public:
+    // inverse_cache_ points into this object's own inverse_states_, so a copy
+    // would alias the original's states.
+    Sampler(const Sampler&) = delete;
+    Sampler& operator=(const Sampler&) = delete;
+
     Sampler(Graph& graph,
             vector<int> target_degree,
             double degree_log_bound,

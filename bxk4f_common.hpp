@@ -229,8 +229,9 @@ inline vector<Transformation> read_batch(istream& input, Vec& initial, Vec& targ
         initial[i] = safe_log(initial[i]);
         target[i] = safe_log(target[i]);
     }
-    // Preserve the old pair orientation: the larger transformation ID comes
-    // first. This matters for the asymmetric opposite-edge-change grid.
+    // Sort by ID so that write_round_results' (i, j <= i) loop puts the larger
+    // ID first in each pair, preserving the old orientation. This matters for
+    // the asymmetric opposite-edge-change grid.
     sort(transformations.begin(), transformations.end(),
          [](const Transformation& a, const Transformation& b) {
              return a.id < b.id;
@@ -346,11 +347,11 @@ void write_round_results(vector<Transformation>& transformations,
 
     vector<SearchResult> results(pair_list.size());
     const int threads = thread_count(pair_list.size());
-    // Pair p goes to thread p % threads. A thread stops at its first error,
-    // and the lowest failing pair is rethrown, as the serial loop would.
-    auto search = [&](int thread_index, vector<Transformation>& table,
+    // Searches pairs first, first + stride, ... A worker stops at its first
+    // error; the lowest failing pair is rethrown, as the serial loop would.
+    auto search = [&](size_t first, size_t stride, vector<Transformation>& table,
                       size_t& failed_at, exception_ptr& error) {
-        for (size_t p = thread_index; p < pair_list.size(); p += threads) {
+        for (size_t p = first; p < pair_list.size(); p += stride) {
             try {
                 results[p] = minimize_pair(table[pair_list[p].first],
                                            table[pair_list[p].second],
@@ -364,19 +365,29 @@ void write_round_results(vector<Transformation>& transformations,
     };
     vector<size_t> failed_at(threads, numeric_limits<size_t>::max());
     vector<exception_ptr> errors(threads);
-    if (threads == 1) {
-        search(0, transformations, failed_at[0], errors[0]);
-    } else {
+    bool searched = false;
+    if (threads > 1) {
         // Each thread fills a private displacement cache; displacement() is
         // pure, so cached values match the serial run exactly.
         vector<vector<Transformation>> tables(threads - 1, transformations);
         vector<thread> pool;
-        for (int t = 1; t < threads; ++t) {
-            pool.emplace_back(search, t, ref(tables[t - 1]),
-                              ref(failed_at[t]), ref(errors[t]));
+        try {
+            for (int t = 1; t < threads; ++t) {
+                pool.emplace_back(search, t, threads, ref(tables[t - 1]),
+                                  ref(failed_at[t]), ref(errors[t]));
+            }
+            search(0, threads, transformations, failed_at[0], errors[0]);
+            searched = true;
+        } catch (const system_error&) {
+            // A thread could not be started: fall back to the serial search
+            // below, which rewrites every result slot.
         }
-        search(0, transformations, failed_at[0], errors[0]);
         for (auto& worker : pool) worker.join();
+    }
+    if (!searched) {
+        fill(failed_at.begin(), failed_at.end(), numeric_limits<size_t>::max());
+        fill(errors.begin(), errors.end(), nullptr);
+        search(0, 1, transformations, failed_at[0], errors[0]);
     }
     const auto first_failure = min_element(failed_at.begin(), failed_at.end());
     if (*first_failure != numeric_limits<size_t>::max()) {

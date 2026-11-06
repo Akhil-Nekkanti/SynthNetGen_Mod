@@ -53,7 +53,11 @@ int main(int argc, char* argv[]) {
     long long u, v, max_id = -1;
     int edges = 0;
 
-    while (fin >> u >> v) {
+    while (fin >> u) {
+        if (!(fin >> v)) {
+            cerr << "Error: " << file1 << " has an odd number of node ids\n";
+            return 1;
+        }
         if (u < 0 || v < 0) {
             cerr << "Error: negative node id in " << file1 << "\n";
             return 1;

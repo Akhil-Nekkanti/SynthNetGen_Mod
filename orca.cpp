@@ -16,7 +16,10 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>. 
 */
 
-/* g++ -O2 -std=c++11 -o orca orca.cpp or use g++ -O2 -std=c++0x -o orca orca.cpp */
+/* Build with build.sh, or: g++ -std=c++17 -O3 -fopenmp -o orca orca.cpp
+   Without -fopenmp it still works, but ORCA_THREADS has no effect.
+   Modified for SynthNetGen_Mod (see git history): exit status on bad input,
+   OpenMP stage 3 for k=5, flat hash tables for k=5 (n must be < 2^21). */
 
 #include <cstdint>
 #include <cstdio>
@@ -77,8 +80,9 @@ bool operator==(const TRIPLE &x, const TRIPLE &y) {
 // unordered_map's node-per-entry layout. It stores the same integer counts,
 // so orbit output is unchanged. get() is read-only and safe to call from
 // several threads once stage 1 has finished.
+const uint64_t EMPTY = ~0ULL; // never a valid packed key
+
 struct CountTable {
-	static constexpr uint64_t EMPTY = ~0ULL; // never a valid packed key
 	vector<uint64_t> keys;
 	vector<int> vals;
 	size_t mask = 0, used = 0;
@@ -86,18 +90,19 @@ struct CountTable {
 	CountTable() { rehash(1u << 16); }
 
 	void rehash(size_t capacity) {
-		vector<uint64_t> old_keys(capacity, EMPTY);
-		vector<int> old_vals(capacity, 0);
-		old_keys.swap(keys);
-		old_vals.swap(vals);
-		mask = capacity - 1;
-		for (size_t i = 0; i < old_keys.size(); i++) {
-			if (old_keys[i] == EMPTY) continue;
-			size_t j = mix64(old_keys[i]) & mask;
-			while (keys[j] != EMPTY) j = (j + 1) & mask;
-			keys[j] = old_keys[i];
-			vals[j] = old_vals[i];
+		vector<uint64_t> new_keys(capacity, EMPTY);
+		vector<int> new_vals(capacity, 0);
+		const size_t new_mask = capacity - 1;
+		for (size_t i = 0; i < keys.size(); i++) {
+			if (keys[i] == EMPTY) continue;
+			size_t j = mix64(keys[i]) & new_mask;
+			while (new_keys[j] != EMPTY) j = (j + 1) & new_mask;
+			new_keys[j] = keys[i];
+			new_vals[j] = vals[i];
 		}
+		keys.swap(new_keys);
+		vals.swap(new_vals);
+		mask = new_mask;
 	}
 
 	int& at(uint64_t key) {
@@ -526,7 +531,7 @@ void count5() {
 
 			// x = orbit-12 (diamond)
 			for (int nx2=nx1+1;nx2<deg[x];nx2++) {
-				int b=inc[x][nx2].first, xb=inc[x][nx2].second;
+				int b=inc[x][nx2].first;
 				if (!adjacent(a,b)) continue;
 				for (int na=0;na<deg[a];na++) {
 					int c=inc[a][na].first, ac=inc[a][na].second;
@@ -563,7 +568,7 @@ void count5() {
 
 			// x = orbit-11 (paw)
 			for (int nx2=nx1+1;nx2<deg[x];nx2++) {
-				int b=inc[x][nx2].first, xb=inc[x][nx2].second;
+				int b=inc[x][nx2].first;
 				if (!adjacent(a,b)) continue;
 				for (int nx3=0;nx3<deg[x];nx3++) {
 					int c=inc[x][nx3].first, xc=inc[x][nx3].second;
@@ -578,7 +583,7 @@ void count5() {
 
 			// x = orbit-10 (paw)
 			for (int nx2=0;nx2<deg[x];nx2++) {
-				int b=inc[x][nx2].first, xb=inc[x][nx2].second;
+				int b=inc[x][nx2].first;
 				if (!adjacent(a,b)) continue;
 				for (int nb=0;nb<deg[b];nb++) {
 					int c=inc[b][nb].first, bc=inc[b][nb].second;
@@ -611,7 +616,7 @@ void count5() {
 
 			// x = orbit-4 (path)
 			for (int na=0;na<deg[a];na++) {
-				int b=inc[a][na].first, ab=inc[a][na].second;
+				int b=inc[a][na].first;
 				if (b==x || adjacent(x,b)) continue;
 				for (int nb=0;nb<deg[b];nb++) {
 					int c=inc[b][nb].first, bc=inc[b][nb].second;
@@ -628,10 +633,10 @@ void count5() {
 
 			// x = orbit-5 (path)
 			for (int nx2=0;nx2<deg[x];nx2++) {
-				int b=inc[x][nx2].first, xb=inc[x][nx2].second;
+				int b=inc[x][nx2].first;
 				if (b==a || adjacent(a,b)) continue;
 				for (int nb=0;nb<deg[b];nb++) {
-					int c=inc[b][nb].first, bc=inc[b][nb].second;
+					int c=inc[b][nb].first;
 					if (c==x || adjacent(a,c) || adjacent(x,c)) continue;
 					orbit[x][5]++;
 					f_17 += deg[a]-1;
@@ -640,10 +645,10 @@ void count5() {
 
 			// x = orbit-6 (claw)
 			for (int na1=0;na1<deg[a];na1++) {
-				int b=inc[a][na1].first, ab=inc[a][na1].second;
+				int b=inc[a][na1].first;
 				if (b==x || adjacent(x,b)) continue;
 				for (int na2=na1+1;na2<deg[a];na2++) {
-					int c=inc[a][na2].first, ac=inc[a][na2].second;
+					int c=inc[a][na2].first;
 					if (c==x || adjacent(x,c) || adjacent(b,c)) continue;
 					orbit[x][6]++;
 					f_22 += deg[a]-3;
@@ -654,10 +659,10 @@ void count5() {
 
 			// x = orbit-7 (claw)
 			for (int nx2=nx1+1;nx2<deg[x];nx2++) {
-				int b=inc[x][nx2].first, xb=inc[x][nx2].second;
+				int b=inc[x][nx2].first;
 				if (adjacent(a,b)) continue;
 				for (int nx3=nx2+1;nx3<deg[x];nx3++) {
-					int c=inc[x][nx3].first, xc=inc[x][nx3].second;
+					int c=inc[x][nx3].first;
 					if (adjacent(a,c) || adjacent(b,c)) continue;
 					orbit[x][7]++;
 					f_23 += deg[x]-3;

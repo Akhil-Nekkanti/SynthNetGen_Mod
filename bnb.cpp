@@ -23,10 +23,17 @@ int main(int argc, char* argv[]) {
     const char* output_env = getenv("BNB_OUTPUT_FILE");
     const string output_file = output_env && *output_env ? output_env : "data1.txt";
 
+    // BNB_SEED (tests only) passes a fixed sampling seed to BLANT so runs are
+    // reproducible; unset keeps BLANT's own random seed.
+    string seed_option;
+    if (const char* seed = getenv("BNB_SEED"); seed && *seed) {
+        seed_option = "-r " + to_string(strtoul(seed, nullptr, 10)) + " ";
+    }
+
     // BLANT keeps its resource-directory cwd while its output can live in
     // private scratch. The graph path is quoted here, so callers pass it raw.
     string cmd = "./blant -k " + to_string(k)
-                + " -s EBE -n 100000 "
+                + " -s EBE -n 100000 " + seed_option
                 + shell_quote(file1)
                 + " > " + shell_quote(output_file)  + " 2>/dev/null";
 
@@ -36,7 +43,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // --- Read first column from data1.txt ---
+    // --- Read the first column of BLANT's output (output_file) ---
     vector<double> a;
 
     ifstream f1(output_file);
@@ -54,19 +61,19 @@ int main(int argc, char* argv[]) {
 
     // --- Normalize so each sums to 100 ---
     double suma = 0;
-    for (int i = 0; i < a.size(); i++) suma += a[i];
+    for (size_t i = 0; i < a.size(); i++) suma += a[i];
 
     if (suma == 0) {
         cerr << "Error: data file sums to zero\n";
         return 1;
     }
 
-    for (int i = 0; i < a.size(); i++) {
+    for (size_t i = 0; i < a.size(); i++) {
         a[i] = (a[i] * 100.0) / suma;
     }
 
-    // --- Output a[i] - b[i] for all 6 ---
-    for (int i = 0; i < a.size(); i++) cout << a[i] << " ";
+    // --- Print the normalized frequencies ---
+    for (size_t i = 0; i < a.size(); i++) cout << a[i] << " ";
 	cout << endl;
     return 0;
 }
